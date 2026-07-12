@@ -1,84 +1,16 @@
-==RESTART WITH NEW GATE== 
- Image neogma:latest Building 
-#1 [internal] load local bake definitions
-#1 reading from stdin 626B done
-#1 DONE 0.0s
-
-#2 [internal] load build definition from Dockerfile
-#2 transferring dockerfile: 2.67kB done
-#2 DONE 0.0s
-
-#3 [internal] load metadata for docker.io/library/python:3.11-slim
-#3 ...
-
-#4 [auth] library/python:pull token for registry-1.docker.io
-#4 DONE 0.0s
-
-#3 [internal] load metadata for docker.io/library/python:3.11-slim
-#3 DONE 0.7s
-
-#5 [internal] load .dockerignore
-#5 transferring context: 2B done
-#5 DONE 0.0s
-
-#6 [internal] load build context
-#6 transferring context: 31.51kB done
-#6 DONE 0.0s
-
-#7 [ 1/10] FROM docker.io/library/python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3
-#7 resolve docker.io/library/python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3 0.0s done
-#7 DONE 0.0s
-
-#8 [ 4/10] COPY requirements.txt ./
-#8 CACHED
-
-#9 [ 7/10] RUN apt-get update && apt-get install -y --no-install-recommends         build-essential ninja-build     && rm -rf /var/lib/apt/lists/*
-#9 CACHED
-
-#10 [ 2/10] RUN apt-get update && apt-get install -y --no-install-recommends         ffmpeg libgl1 libglib2.0-0 git     && rm -rf /var/lib/apt/lists/*
-#10 CACHED
-
-#11 [ 6/10] RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0
-#11 CACHED
-
-#12 [ 3/10] WORKDIR /app
-#12 CACHED
-
-#13 [ 5/10] RUN pip install --no-cache-dir -r requirements.txt
-#13 CACHED
-
-#14 [ 8/10] RUN if [ "1" = "1" ]; then       (pip install --no-cache-dir openmim         && mim install "mmengine>=0.10" "mmcv>=2.1.0,<2.3.0" "mmdet>=3.2.0"         && pip install --no-cache-dir "mmpose>=1.3.0"         && echo "MMPose OK")       || echo "WARNING: MMPose build failed — falling back to Keypoint R-CNN";     fi
-#14 CACHED
-
-#15 [ 9/10] COPY pipeline ./pipeline
-#15 DONE 0.0s
-
-#16 [10/10] COPY webapp ./webapp
-#16 DONE 0.0s
-
-#17 exporting to image
-#17 exporting layers
-#17 exporting layers 0.1s done
-#17 exporting manifest sha256:8a460f3899927451951e0f5dd6cb9091308a70be81d70506bacce503dd875aaf 0.0s done
-#17 exporting config sha256:f723171983a3956a64731eb6038a899d48abda88423a8ba4286bca7204a0d01c
-#17 exporting config sha256:f723171983a3956a64731eb6038a899d48abda88423a8ba4286bca7204a0d01c 0.0s done
-#17 exporting attestation manifest sha256:42c9bbd9b0dce5ff9ca6da8650e201bf475a961a570cad9f2fbe364a72006556 0.0s done
-#17 exporting manifest list sha256:18d04855bf294d3fe2b1bb76de6bb98b0eb67a901ea48b8a430d89e50517b872 0.0s done
-#17 naming to docker.io/library/neogma:latest done
-#17 unpacking to docker.io/library/neogma:latest 0.0s done
-#17 DONE 0.2s
-
-#18 resolving provenance for metadata file
-#18 DONE 0.0s
- Image neogma:latest Built 
- Container neogma-neogma-1 Recreate 
- Container neogma-neogma-1 Recreated 
- Container neogma-neogma-1 Starting 
- Container neogma-neogma-1 Started 
- 
 ==GATE TESTS== 
-python: can't open file '/app/webapp/../gate_test.py': [Errno 2] No such file or directory
+absolute floor 5s | Prechtl standard 60s
+ duration   pass  compliant  message
+       3s  False      False  Video is 3.0s. At least 5s is needed to form a single analysis
+       5s   True      False  Video is 5s, below the 60s Prechtl standard. It will be scored
+      20s   True      False  Video is 20s, below the 60s Prechtl standard. It will be score
+      45s   True      False  Video is 45s, below the 60s Prechtl standard. It will be score
+      60s   True       True  ok
+      90s   True       True  ok
+     400s   True       True  Video is 400s, longer than usual; only the protocol-compliant 
+age 4    w 90s  pass=False  Corrected age 4.0 weeks is outside the fidgety-movement window
+age 30   w 90s  pass=False  Corrected age 30.0 weeks is outside the fidgety-movement windo
  
 ==HEALTH== 
- 
-==COMMIT+PUSH== 
+{"ok":true,"device":"cuda","target_fps":30.0,"pose_backend":"vitpose","pose_backend_label":"ViTPose-H","pose_is_fallback":false,"gma_labels":{"fm_present":"Fidgety movements PRESENT (normal)","fm_abnormal":"Fidgety movements ABNORMAL","fm_absent":"Fidgety movements ABSENT (high CP risk)"},"cp_labels":{"no_cp":"No CP at 12-24 months","cp":"Cerebral palsy confirmed"},"model_exists":false} 
+==GIT== 
