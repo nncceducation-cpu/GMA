@@ -32,6 +32,14 @@ RUN pip install --no-cache-dir --index-url ${TORCH_INDEX} ${TORCH_SPEC}
 # less accurate on distal joints and is therefore for development only. The
 # backend in use is recorded per-recording and surfaced in the UI, so a fallback
 # can never be mistaken for the real thing.
+#
+# mmcv compiles from source (no wheel for this torch/CUDA pair), which needs a
+# C++ toolchain. This apt layer sits AFTER torch deliberately: folding it into
+# the base apt layer would invalidate the 3 GB torch download on every change.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
 ARG BUILD_MMPOSE=1
 RUN if [ "$BUILD_MMPOSE" = "1" ]; then \
       (pip install --no-cache-dir openmim \
