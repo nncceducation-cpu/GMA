@@ -809,3 +809,9 @@ mmpose_available True
 backend vitpose
  
 {"ok":true,"device":"cuda","target_fps":30.0,"pose_backend":"vitpose","pose_backend_label":"ViTPose-H","pose_is_fallback":false,"gma_labels":{"fm_present":"Fidgety movements PRESENT (normal)","fm_abnormal":"Fidgety movements ABNORMAL","fm_absent":"Fidgety movements ABSENT (high CP risk)"},"cp_labels":{"no_cp":"No CP at 12-24 months","cp":"Cerebral palsy confirmed"},"model_exists":false} 
+warning: in the working copy of 'Dockerfile', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '_check.log', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '_stat.log', LF will be replaced by CRLF the next time Git touches it
+To https://github.com/nncceducation-cpu/GMA.git
+   e0a159d..8726c78  main -> main
+---END--- 

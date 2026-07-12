@@ -177,7 +177,9 @@ async def upload(file: UploadFile = File(...),
 
     rec = STORE.ingest(video=tmp, subject_id=subject_id, recording_id=rid,
                        corrected_age_weeks=corrected_age_weeks, site=site,
-                       risk_group=risk_group)
+                       risk_group=risk_group,
+                       extra={"duration_s": gate["duration_s"],
+                              "protocol_compliant": gate["protocol_compliant"]})
     tmp.unlink(missing_ok=True)
 
     job = Job(id=rid, recording_id=rid, subject_id=subject_id, sha=sha,
@@ -377,7 +379,12 @@ $('go').onclick=async()=>{
     $('msg').innerHTML='<div class="warn"><b>Refused.</b><br>'+
       (d.blocking?d.blocking.join('<br>'):JSON.stringify(d))+'</div>';
     $('prog').style.display='none';$('go').disabled=false;return;}
-  if(j.duplicate_of)$('msg').innerHTML='<div class="warn">This video is byte-identical to a recording already stored for subject <b>'+j.duplicate_of.subject_id+'</b>.</div>';
+  let pre='';
+  if(j.gate&&j.gate.warnings&&j.gate.warnings.length)
+    pre+='<div class="warn"><b>Accepted with warnings.</b><br>'+j.gate.warnings.join('<br>')+'</div>';
+  if(j.duplicate_of)
+    pre+='<div class="warn">This video is byte-identical to a recording already stored for subject <b>'+j.duplicate_of.subject_id+'</b>.</div>';
+  $('msg').innerHTML=pre;
   jid=j.job_id;poll();
 };
 async function poll(){

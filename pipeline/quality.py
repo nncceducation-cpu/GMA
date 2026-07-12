@@ -11,10 +11,17 @@ Protocol (Prechtl standard; as operationalised by Segado 2026):
   * no pacifier, no toys, no interaction
   * 60-120 s of usable video
   * infant awake, active; not crying, not drowsy
+
+DURATION IS A WARNING, AGE IS A REFUSAL. That asymmetry is deliberate. A clip
+filmed outside 9-20 weeks corrected age cannot be scored at all — there is no
+fidgety-movement phenomenon to detect, so any output would be meaningless. A
+short clip, by contrast, is measurable but under-sampled: the pipeline can run,
+and the honest thing to do is run it, say so, and stamp the record.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -24,7 +31,25 @@ from pipeline.normalise import COCO, NormalisedPose
 # The fidgety-movement window. Outside it, absence of FMs means nothing.
 AGE_MIN_WEEKS = 9.0
 AGE_MAX_WEEKS = 20.0
-MIN_DURATION_S = 60.0
+
+# --- duration -------------------------------------------------------------
+# Two different thresholds, because they answer two different questions.
+#
+# PROTOCOL_MIN_DURATION_S is what the *Prechtl standard* asks for. Fidgety
+# movements are intermittent: they come in bouts separated by pauses, so a short
+# clip can miss them entirely and "FMs absent" then means "I didn't film long
+# enough", not "this infant has no FMs". That is a false positive for CP risk,
+# and it is the reason the 60 s floor exists.
+#
+# ABSOLUTE_MIN_DURATION_S is what the *pipeline* physically needs: one feature
+# window. Below it there is nothing to compute and the tool must refuse.
+#
+# Between the two, we ACCEPT and score, but we warn, and we mark the recording
+# protocol_non_compliant so it can be excluded from any analysis later. A short
+# clip is fine for trying the tool out; it is not fine for a cohort.
+PROTOCOL_MIN_DURATION_S = float(os.getenv("NEOGMA_PROTOCOL_MIN_S", "60"))
+ABSOLUTE_MIN_DURATION_S = float(os.getenv("NEOGMA_MIN_DURATION_S",
+                                          os.getenv("NEOGMA_WINDOW_SECONDS", "5")))
 MAX_DURATION_S = 300.0
 MIN_MEAN_CONF = 0.4
 MAX_LOW_CONF_FRACTION = 0.20
@@ -35,9 +60,18 @@ WINGSPAN_RATIO_RANGE = (0.45, 1.15)
 
 def protocol_gate(corrected_age_weeks: Optional[float],
                   duration_s: float) -> Dict:
-    """Hard gate. Returns {'pass': bool, 'blocking': [...], 'warnings': [...]}"""
+    """Gate on the protocol.
+
+    Returns {'pass', 'blocking', 'warnings', 'protocol_compliant', 'duration_s'}.
+
+    `pass` means the pipeline will run. `protocol_compliant` means the recording
+    meets the Prechtl standard. They are NOT the same thing, and separating them
+    is the whole point: a 20 s clip will be scored, but it will be stamped
+    non-compliant forever so it can be excluded from a cohort later.
+    """
     blocking: List[str] = []
     warnings: List[str] = []
+    compliant = True
 
     if corrected_age_weeks is None:
         blocking.append(
@@ -50,15 +84,30 @@ def protocol_gate(corrected_age_weeks: Optional[float],
             "weeks). Absence of fidgety movements outside this window carries no "
             "predictive meaning. REFUSING to score.")
 
-    if duration_s < MIN_DURATION_S:
+    # --- duration: refuse only when there is literally nothing to compute ----
+    if duration_s < ABSOLUTE_MIN_DURATION_S:
         blocking.append(
-            f"Video is {duration_s:.0f}s; the protocol requires at least "
-            f"{MIN_DURATION_S:.0f}s of usable recording.")
+            f"Video is {duration_s:.1f}s. At least {ABSOLUTE_MIN_DURATION_S:.0f}s "
+            "is needed to form a single analysis window — there is nothing to "
+            "measure below that.")
+    elif duration_s < PROTOCOL_MIN_DURATION_S:
+        compliant = False
+        warnings.append(
+            f"Video is {duration_s:.0f}s, below the {PROTOCOL_MIN_DURATION_S:.0f}s "
+            "Prechtl standard. It will be scored, but read the result with care: "
+            "fidgety movements are INTERMITTENT, so a short clip can miss a bout "
+            "entirely. 'FMs absent' from a short video may simply mean 'not filmed "
+            "long enough' — which reads as false CP risk. This recording is marked "
+            "protocol_non_compliant and should be excluded from cohort analyses.")
     elif duration_s > MAX_DURATION_S:
         warnings.append(f"Video is {duration_s:.0f}s, longer than usual; "
                         "only the protocol-compliant segment should be scored.")
 
-    return {"pass": len(blocking) == 0, "blocking": blocking, "warnings": warnings}
+    return {"pass": len(blocking) == 0,
+            "blocking": blocking,
+            "warnings": warnings,
+            "protocol_compliant": compliant and not blocking,
+            "duration_s": round(float(duration_s), 1)}
 
 
 def pose_quality(np_: NormalisedPose) -> Dict:
