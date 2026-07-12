@@ -7,7 +7,9 @@ services:
         TORCH_INDEX: https://download.pytorch.org/whl/cu128
     image: neogma:latest
     ports:
-      - "8000:8000"
+      # 8001 on the host: Nmotion already owns 8000, and both should be able to
+      # run side by side.
+      - "8001:8000"
     environment:
       NEOGMA_DEVICE: "cuda"
       # Every clip is resampled to this rate. Pose velocity/acceleration are

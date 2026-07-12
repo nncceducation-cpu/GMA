@@ -68,6 +68,7 @@ class Job:
     corrected_age_weeks: Optional[float] = None
     site: str = ""
     sha: str = ""
+    pose_backend: str = ""
     n_windows: int = 0
     qc: Dict = field(default_factory=dict)
     gate: Dict = field(default_factory=dict)
@@ -77,22 +78,35 @@ class Job:
 JOBS: Dict[str, Job] = {}
 
 
+POSE_BACKEND = os.getenv("NEOGMA_POSE_BACKEND", "auto")
+
+POSE_LABEL = {
+    "vitpose": "ViTPose-H",
+    "keypointrcnn": "Keypoint R-CNN (FALLBACK - dev only)",
+}
+
+
 def _get_pose():
     global _POSE
     with _POSE_LOCK:
         if _POSE is None:
             from pipeline.pose_extract import PoseExtractor
-            _POSE = PoseExtractor(device=DEVICE)
+            _POSE = PoseExtractor(backend=POSE_BACKEND, device=DEVICE)
         return _POSE
 
 
 def _process(job: Job, video: Path):
     try:
         job.status = "running"
+        pose = _get_pose()
+        job.pose_backend = pose.backend
         job.stage = "pose"; job.percent = 10
-        job.message = "Estimating infant pose (ViTPose-H)..."
-        xy, conf, src_fps = _get_pose().extract(video)
+        job.message = f"Estimating infant pose ({POSE_LABEL[pose.backend]})..."
+        xy, conf, src_fps = pose.extract(video)
         STORE.save_pose(job.recording_id, xy, conf, src_fps, level="L1")
+        # The backend is provenance. Mixing backends within a cohort is a site
+        # effect under another name, and probes.py will flag it as one.
+        STORE.set_label(job.recording_id, pose_backend=pose.backend)
 
         job.stage = "normalise"; job.percent = 55
         job.message = "Normalising (frame rate, scale, rotation, jitter)..."
@@ -256,7 +270,11 @@ def export(rid: str, fname: str):
 
 @app.get("/health")
 def health() -> dict:
+    from pipeline.pose_extract import resolve_backend
+    b = resolve_backend(POSE_BACKEND)
     return {"ok": True, "device": DEVICE, "target_fps": TARGET_FPS,
+            "pose_backend": b, "pose_backend_label": POSE_LABEL[b],
+            "pose_is_fallback": b != "vitpose",
             "gma_labels": GMA_LABELS, "cp_labels": CP_LABELS,
             "model_exists": MODEL_PATH.exists()}
 

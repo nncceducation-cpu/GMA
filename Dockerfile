@@ -24,9 +24,22 @@ ARG TORCH_SPEC=torch==2.11.0 torchvision==0.26.0
 RUN pip install --no-cache-dir --index-url ${TORCH_INDEX} ${TORCH_SPEC}
 
 # MMPose stack for ViTPose-H. Installed after torch, which mim requires.
-RUN pip install --no-cache-dir openmim \
-    && mim install "mmengine>=0.10" "mmcv>=2.1.0,<2.3.0" "mmdet>=3.2.0" \
-    && pip install --no-cache-dir "mmpose>=1.3.0"
+#
+# This step is allowed to FAIL, deliberately. mmcv has no prebuilt wheel for
+# torch 2.11 / cu128, so it compiles from source and can take 40+ min or fall
+# over entirely. If it does, the image still builds and the app still runs:
+# pipeline/pose_extract.py falls back to torchvision's Keypoint R-CNN, which is
+# less accurate on distal joints and is therefore for development only. The
+# backend in use is recorded per-recording and surfaced in the UI, so a fallback
+# can never be mistaken for the real thing.
+ARG BUILD_MMPOSE=1
+RUN if [ "$BUILD_MMPOSE" = "1" ]; then \
+      (pip install --no-cache-dir openmim \
+        && mim install "mmengine>=0.10" "mmcv>=2.1.0,<2.3.0" "mmdet>=3.2.0" \
+        && pip install --no-cache-dir "mmpose>=1.3.0" \
+        && echo "MMPose OK") \
+      || echo "WARNING: MMPose build failed — falling back to Keypoint R-CNN"; \
+    fi
 
 COPY pipeline ./pipeline
 COPY webapp ./webapp
