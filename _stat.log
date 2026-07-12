@@ -1,6 +1,0 @@
-==CONTAINERS== 
-nmotion-nmotion-1|Up 6 hours|0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
-==IMAGES== 
-==BUILDKIT ACTIVE== 
-docker.exe                   15284 Console                    1     20,460 K
----END--- 
