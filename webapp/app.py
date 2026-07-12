@@ -98,8 +98,16 @@ def _get_pose():
 def _process(job: Job, video: Path):
     try:
         job.status = "running"
+        job.stage = "model"; job.percent = 5
+        # ViTPose-H is ~2.4 GB and is fetched on first use. Without this message
+        # the UI sits at 10% for several minutes and looks hung — which is
+        # exactly what it looked like the first time.
+        job.message = ("Loading pose model. First run downloads ViTPose-H "
+                       "(~2.4 GB) — this happens once, then it is cached.")
         pose = _get_pose()
         job.pose_backend = pose.backend
+        pose._load()
+
         job.stage = "pose"; job.percent = 10
         job.message = f"Estimating infant pose ({POSE_LABEL[pose.backend]})..."
         xy, conf, src_fps = pose.extract(video)

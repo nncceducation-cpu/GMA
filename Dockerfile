@@ -23,6 +23,20 @@ ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
 ARG TORCH_SPEC=torch==2.11.0 torchvision==0.26.0
 RUN pip install --no-cache-dir --index-url ${TORCH_INDEX} ${TORCH_SPEC}
 
+# A LOCK, not a hope. "Install torch last" was not enough: the MMPose step below
+# resolved `torch` from PyPI and cheerfully replaced our 2.11.0+cu128 build with
+# 2.13.0 + cu13 wheels, at which point the GPU is the wrong CUDA and nothing says
+# so. It also dragged setuptools up to 83, which removed pkg_resources and broke
+# `mim` itself.
+#
+# PIP_CONSTRAINT is honoured by every later pip invocation, including the ones
+# mim shells out to, so these three packages simply cannot move again. Note that
+# `torch==2.11.0` matches `2.11.0+cu128` (PEP 440: a specifier with no local
+# version matches any local version), so this pins the version without fighting
+# the CUDA tag.
+RUN printf 'torch==2.11.0\ntorchvision==0.26.0\nsetuptools<81\n' > /etc/pip-constraints.txt
+ENV PIP_CONSTRAINT=/etc/pip-constraints.txt
+
 # MMPose stack for ViTPose-H. Installed after torch, which mim requires.
 #
 # This step is allowed to FAIL, deliberately. mmcv has no prebuilt wheel for
@@ -40,8 +54,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
-# Two ABI traps live in this step; both bite at RUNTIME, not build time, so the
-# build looks clean and then pose extraction dies on the first clip.
+# Three traps live in this step. All bite at RUNTIME, not build time, so the
+# build looks clean and pose extraction then dies on the first clip.
+#
+# 0. ViTPose's BACKBONE is not in mmpose. The config asks for
+#    `mmpretrain.VisionTransformer`, so without mmpretrain installed the 2.4 GB
+#    checkpoint downloads perfectly and then has nothing to load into:
+#    "KeyError: mmpretrain.VisionTransformer is not in the mmpose::model
+#    registry". mmpretrain in turn needs importlib_metadata.
 #
 # 1. xtcocotools (an mmpose dependency) ships a wheel compiled against the
 #    NumPy 1.x C API. This image has NumPy 2.x, so importing it raises
@@ -50,20 +70,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #    --no-build-isolation is essential, otherwise pip builds it in a clean env
 #    against whatever NumPy it fetches, and we are back where we started.
 #
-# 2. setuptools >= 81 removed pkg_resources, which mmengine still imports
-#    (get_installed_path -> from pkg_resources import ...). The xtcocotools
-#    source build pulls in a modern setuptools as a side effect, so this must be
-#    pinned back down AFTERWARDS, not before.
+# 2. setuptools >= 81 removed pkg_resources, which both mmengine and mim import.
+#    Held down by the constraints file above.
+#
+# The final check does not just import — it asserts that torch is still the
+# CUDA build we installed. A silent downgrade to a CPU or cu13 wheel is the most
+# expensive failure here, because everything still "works", just wrongly and 20x
+# slower. If any of this breaks, the whole step fails and the app falls back to
+# Keypoint R-CNN, visibly.
 ARG BUILD_MMPOSE=1
 RUN if [ "$BUILD_MMPOSE" = "1" ]; then \
       (pip install --no-cache-dir openmim \
         && mim install "mmengine>=0.10" "mmcv>=2.1.0,<2.3.0" "mmdet>=3.2.0" \
         && pip install --no-cache-dir "mmpose>=1.3.0" \
-        && pip install --no-cache-dir cython \
+        && mim install "mmpretrain>=1.0.0" \
+        && pip install --no-cache-dir importlib_metadata cython \
         && pip install --no-cache-dir --force-reinstall --no-build-isolation \
              --no-binary=xtcocotools xtcocotools \
-        && pip install --no-cache-dir "setuptools<81" \
-        && python -c "from mmpose.apis import MMPoseInferencer" \
+        && python -c "import torch, mmpretrain; from mmpose.apis import MMPoseInferencer; \
+assert torch.__version__.startswith('2.11.0'), 'torch was replaced: ' + torch.__version__; \
+assert 'cu128' in torch.__version__, 'torch is not the cu128 build: ' + torch.__version__; \
+print('torch', torch.__version__, 'intact')" \
         && echo "MMPose OK") \
       || echo "WARNING: MMPose build failed — falling back to Keypoint R-CNN"; \
     fi
