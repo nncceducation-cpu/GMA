@@ -22,9 +22,10 @@ __pycache__/
 venv*/
 .pytest_cache/
 
-# scratch
+# scratch — build/debug logs and helper scripts. Not part of the tool.
 _*.txt
 _*.bat
+_*.log
 _*.py
 !__init__.py
 
