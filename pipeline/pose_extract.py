@@ -72,11 +72,22 @@ _VITPOSE_MISSING = (
 
 
 def mmpose_available() -> bool:
+    """Import what we ACTUALLY use, not just the top-level package.
+
+    `import mmpose` succeeds even when the inference stack is broken, because the
+    breakages live deeper: xtcocotools compiled against the wrong NumPy ABI, or
+    mmengine reaching for pkg_resources on a setuptools that no longer ships it.
+    Both of those raise only when mmpose.apis is imported — i.e. on the first
+    clip, in a worker thread, after the user has waited. Probing the real import
+    path here means a broken MMPose degrades to the fallback backend at startup,
+    visibly, instead of crashing mid-job.
+    """
     try:
-        import mmcv    # noqa: F401
-        import mmpose  # noqa: F401
+        from mmpose.apis import MMPoseInferencer  # noqa: F401
         return True
-    except Exception:
+    except Exception as exc:
+        logger.warning("MMPose present but not importable (%s: %s)",
+                       type(exc).__name__, exc)
         return False
 
 

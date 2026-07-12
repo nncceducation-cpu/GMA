@@ -40,11 +40,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
+# Two ABI traps live in this step; both bite at RUNTIME, not build time, so the
+# build looks clean and then pose extraction dies on the first clip.
+#
+# 1. xtcocotools (an mmpose dependency) ships a wheel compiled against the
+#    NumPy 1.x C API. This image has NumPy 2.x, so importing it raises
+#    "numpy.dtype size changed ... Expected 96 from C header, got 88".
+#    Fix: rebuild it from source against the NumPy that is actually installed.
+#    --no-build-isolation is essential, otherwise pip builds it in a clean env
+#    against whatever NumPy it fetches, and we are back where we started.
+#
+# 2. setuptools >= 81 removed pkg_resources, which mmengine still imports
+#    (get_installed_path -> from pkg_resources import ...). The xtcocotools
+#    source build pulls in a modern setuptools as a side effect, so this must be
+#    pinned back down AFTERWARDS, not before.
 ARG BUILD_MMPOSE=1
 RUN if [ "$BUILD_MMPOSE" = "1" ]; then \
       (pip install --no-cache-dir openmim \
         && mim install "mmengine>=0.10" "mmcv>=2.1.0,<2.3.0" "mmdet>=3.2.0" \
         && pip install --no-cache-dir "mmpose>=1.3.0" \
+        && pip install --no-cache-dir cython \
+        && pip install --no-cache-dir --force-reinstall --no-build-isolation \
+             --no-binary=xtcocotools xtcocotools \
+        && pip install --no-cache-dir "setuptools<81" \
+        && python -c "from mmpose.apis import MMPoseInferencer" \
         && echo "MMPose OK") \
       || echo "WARNING: MMPose build failed — falling back to Keypoint R-CNN"; \
     fi
