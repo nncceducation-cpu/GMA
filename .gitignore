@@ -1,0 +1,36 @@
+# ============================================================================
+# PATIENT DATA — NEVER COMMIT. Infant video is identifiable health data.
+# ============================================================================
+runs/
+webapp/data_runtime/
+*.mp4
+*.MP4
+*.mov
+*.avi
+*.mkv
+models/*.joblib
+models/*.csv
+models/*.zip
+# pose keypoints are still identifiable movement data
+*.npy
+*.npz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv*/
+.pytest_cache/
+
+# scratch
+_*.txt
+_*.bat
+_*.py
+!__init__.py
+
+# Docs: publish only what the team needs
+*.md
+!README.md
+!EVIDENCE.md
+!PROTOCOL.md
+!CHANGELOG.md

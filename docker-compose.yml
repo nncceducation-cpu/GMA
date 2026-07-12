@@ -1,0 +1,44 @@
+services:
+  neogma:
+    build:
+      context: .
+      args:
+        # CUDA 12.8 — required for Blackwell (RTX 50-series). cu121 will NOT work.
+        TORCH_INDEX: https://download.pytorch.org/whl/cu128
+    image: neogma:latest
+    ports:
+      - "8000:8000"
+    environment:
+      NEOGMA_DEVICE: "cuda"
+      # Every clip is resampled to this rate. Pose velocity/acceleration are
+      # per-frame quantities, so without this the camera outpredicts the infant.
+      NEOGMA_TARGET_FPS: "30"
+      # Windowed features. NEVER average over the whole video: Segado's own
+      # limitation was that "small amplitude rolls of the wrists and ankles...
+      # may be smoothed out when averaged over an entire video".
+      NEOGMA_WINDOW_SECONDS: "5.0"
+      NEOGMA_OVERLAP: "0.5"
+      # Fidgety movements are SMALL amplitude. Threshold is in torso units
+      # (pose is scale-normalised), so it is camera-independent.
+      NEOGMA_FIDGETY_AMP_MAX: "0.15"
+      NEOGMA_FID_FMIN: "0.5"
+      NEOGMA_FID_FMAX: "6.0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      # Processed clips + labels live in a REAL folder on the host, so they are
+      # visible and backupable. Patient video NEVER goes in git.
+      - ./runs:/app/webapp/data_runtime
+      - ./models:/app/models
+      - ./pipeline:/app/pipeline      # live code — edit without rebuild
+      - ./webapp:/app/webapp
+      - neogma_weights:/app/.torch    # ViTPose-H weights cached between runs
+    restart: unless-stopped
+
+volumes:
+  neogma_weights:
