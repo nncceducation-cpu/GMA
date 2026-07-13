@@ -83,7 +83,8 @@ def mmpose_available() -> bool:
     visibly, instead of crashing mid-job.
     """
     try:
-        from mmpose.apis import MMPoseInferencer  # noqa: F401
+        from mmpose.apis import inference_topdown  # noqa: F401
+        from mmpose.apis.inferencers import Pose2DInferencer  # noqa: F401
         return True
     except Exception as exc:
         logger.warning("MMPose present but not importable (%s: %s)",
@@ -123,9 +124,13 @@ class PoseExtractor:
         if self._impl is not None:
             return self._impl
         if self.backend == "vitpose":
-            from mmpose.apis import MMPoseInferencer
+            # We build ViTPose through Pose2DInferencer (which resolves the model
+            # alias to a config + checkpoint for us) but then use ONLY its pose
+            # model, driving it with our own person boxes. See _detector().
+            from mmpose.apis.inferencers import Pose2DInferencer
             logger.info("loading ViTPose-H (%s) on %s", self.model, self.device)
-            self._impl = MMPoseInferencer(pose2d=self.model, device=self.device)
+            p2d = Pose2DInferencer(model=self.model, device=self.device)
+            self._impl = (p2d.model, self._detector())
         else:
             import torch
             from torchvision.models.detection import (
@@ -154,23 +159,111 @@ class PoseExtractor:
             xy, conf, fps = self._extract_krcnn(video_path)
         return self._fill_gaps(xy), conf, fps
 
-    def _extract_vitpose(self, video_path: Path):
+    def _detector(self):
+        """Person detector — torchvision Faster R-CNN, NOT mmdet.
+
+        WHY NOT mmdet, which MMPose would use by default:
+
+        mmcv has no prebuilt wheel for torch 2.11 / cu128, so it compiles from
+        source in this image — and without the CUDA toolkit (nvcc) present it
+        builds CPU-only operators. MMPose then runs the RTMDet detector on the
+        GPU, its NMS looks for a CUDA kernel that was never compiled, and you get
+        `RuntimeError: nms_impl: implementation for device cuda:0 not found` —
+        several minutes into the first clip, after a 2.4 GB download.
+
+        The alternatives were: ship a ~3 GB CUDA toolkit into the image and
+        recompile mmcv's kernels, or stop asking mmcv to do detection. Detection
+        is the ONLY thing here that needs NMS, and torchvision's NMS is a
+        compiled CUDA op we already have and already verified. So we detect with
+        torchvision and pose with ViTPose. mmcv is still used inside mmpose for
+        image transforms, which are CPU ops and work fine.
+
+        This is not a downgrade: the pose model — the part that actually decides
+        the wrist and ankle positions GMA depends on — is still ViTPose-H.
+        """
+        import torch
+        from torchvision.models.detection import (
+            FasterRCNN_ResNet50_FPN_Weights, fasterrcnn_resnet50_fpn)
+        dev = self.device if torch.cuda.is_available() else "cpu"
+        det = fasterrcnn_resnet50_fpn(
+            weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT,
+            box_score_thresh=0.5)
+        det.eval().to(dev)
+        logger.info("person detector: torchvision Faster R-CNN on %s", dev)
+        return det
+
+    def _extract_vitpose(self, video_path: Path, det_batch: int = 8):
         import cv2
+        import torch
+        from mmpose.apis import inference_topdown
+
+        pose_model, det = self._load()
+        dev = next(det.parameters()).device
+
         cap = cv2.VideoCapture(str(video_path))
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+        frames, boxes = [], []
+
+        def detect(batch):
+            """One person box per frame: the highest-scoring COCO 'person' (id 1).
+
+            The infant-pose benchmark found that "using the highest-scored
+            detection resulted in the closest performance to the optimal
+            detection for all methods". The protocol also guarantees one infant
+            alone in shot, so a second detection is an adult's hand or a toy —
+            neither of which we want to pose-estimate.
+            """
+            if not batch:
+                return
+            tens = [torch.from_numpy(cv2.cvtColor(f, cv2.COLOR_BGR2RGB))
+                    .permute(2, 0, 1).float().div_(255).to(dev) for f in batch]
+            with torch.no_grad():
+                outs = det(tens)
+            for f, o in zip(batch, outs):
+                person = o["labels"] == 1
+                if not bool(person.any()):
+                    boxes.append(None)
+                    continue
+                scores = o["scores"][person]
+                bb = o["boxes"][person][int(torch.argmax(scores))]
+                boxes.append(bb.cpu().numpy().astype(np.float32))
+
+        buf = []
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frames.append(frame)
+            buf.append(frame)
+            if len(buf) >= det_batch:
+                detect(buf)
+                buf = []
+        detect(buf)
         cap.release()
 
-        inferencer = self._load()
+        if not frames:
+            raise ValueError(f"no frames decoded from {video_path}")
+
         xs, cs = [], []
-        for result in inferencer(str(video_path), show=False):
-            preds = result["predictions"][0]
-            if not preds:
+        for frame, bb in zip(frames, boxes):
+            if bb is None:
+                # No infant found in this frame. Emit NaN and let normalise()
+                # interpolate — never drop the frame, because dropping frames
+                # fabricates a time base and every feature is a derivative.
                 xs.append(np.full((17, 2), np.nan, dtype=np.float32))
                 cs.append(np.zeros(17, dtype=np.float32))
                 continue
-            best = max(preds, key=lambda p: float(np.mean(p["keypoint_scores"])))
-            xs.append(np.asarray(best["keypoints"], dtype=np.float32)[:17])
-            cs.append(np.asarray(best["keypoint_scores"], dtype=np.float32)[:17])
+            res = inference_topdown(pose_model, frame, bboxes=bb[None, :],
+                                    bbox_format="xyxy")
+            if not res:
+                xs.append(np.full((17, 2), np.nan, dtype=np.float32))
+                cs.append(np.zeros(17, dtype=np.float32))
+                continue
+            pi = res[0].pred_instances
+            xs.append(np.asarray(pi.keypoints[0], dtype=np.float32)[:17])
+            cs.append(np.asarray(pi.keypoint_scores[0], dtype=np.float32)[:17])
+
         return np.stack(xs), np.stack(cs), float(fps)
 
     def _extract_krcnn(self, video_path: Path, batch: int = 8):
