@@ -11,6 +11,18 @@ webapp/data_runtime/
 models/*.joblib
 models/*.csv
 models/*.zip
+# The exported ViTPose-H network: 1.27 GB. GitHub rejects anything over 100 MB,
+# and a model binary does not belong in source control anyway. It is published as
+# a RELEASE ASSET and the installer downloads it. Never commit it.
+models/*.ts
+models/*.pt
+models/*.pth
+models/*.onnx
+
+# Your own analysis folders. These hold patient-derived numbers and figures and
+# are not part of the tool.
+analysis_*/
+runs*/
 # pose keypoints are still identifiable movement data
 *.npy
 *.npz

@@ -72,7 +72,7 @@ PAD_FRAC = float(os.getenv("NEOGMA_BOX_PAD", "0.18"))
 # Set NEOGMA_FP16=0 to fall back to fp32 if you ever want to check.
 FP16 = os.getenv("NEOGMA_FP16", "1") == "1"
 
-BACKENDS = ("vitpose", "keypointrcnn")
+BACKENDS = ("vitpose", "vitpose_mmpose", "keypointrcnn")
 
 _FALLBACK_WARNING = (
     "MMPose unavailable — falling back to torchvision Keypoint R-CNN. Accuracy "
@@ -86,6 +86,26 @@ _VITPOSE_MISSING = (
     "image. Either install it, or set NEOGMA_POSE_BACKEND=keypointrcnn and "
     "accept the accuracy cost (which is recorded in the manifest)."
 )
+
+
+NATIVE_TS = os.getenv("NEOGMA_VITPOSE_TS", "/app/models/vitpose_h.ts")
+
+
+def native_available() -> bool:
+    """The mm-free ViTPose-H runner: torch + torchvision, no mmcv, no compiler.
+
+    THIS IS THE PREFERRED PATH, and not only because it installs anywhere.
+
+    A centre running the Docker image and a centre running the desktop installer
+    must produce the SAME numbers. If Docker used mmpose and the installer used
+    the native runner, the two would differ by ~5% on distal speed — small, but
+    systematic, and systematically different BY INSTALL METHOD. That is a site
+    effect wearing a disguise: probes.py would eventually flag it, and by then a
+    year of contributions would be contaminated.
+
+    So both use this. mmpose is now only the tool that EXPORTED the weights.
+    """
+    return Path(NATIVE_TS).exists()
 
 
 def mmpose_available() -> bool:
@@ -110,16 +130,30 @@ def mmpose_available() -> bool:
 
 
 def resolve_backend(requested: str = "auto") -> str:
-    """'auto' picks ViTPose when MMPose imports, else Keypoint R-CNN."""
+    """'auto': native ViTPose-H if the weights are here, then mmpose, then the
+    Keypoint R-CNN fallback."""
     requested = (requested or "auto").lower()
     if requested == "auto":
+        if native_available():
+            return "vitpose"                  # native TorchScript — the default
         if mmpose_available():
-            return "vitpose"
+            logger.warning(
+                "Native ViTPose weights not found at %s; falling back to mmpose. "
+                "Numbers will differ slightly from centres running the installer "
+                "— export the weights with tools/export_vitpose.py.", NATIVE_TS)
+            return "vitpose_mmpose"
         logger.warning(_FALLBACK_WARNING)
         return "keypointrcnn"
+    if requested == "vitpose" and not native_available():
+        if mmpose_available():
+            return "vitpose_mmpose"
     if requested not in BACKENDS:
         raise ValueError(f"unknown pose backend '{requested}'; use one of {BACKENDS}")
-    if requested == "vitpose" and not mmpose_available():
+    if requested == "vitpose" and not native_available():
+        raise RuntimeError(
+            f"Native ViTPose weights not found at {NATIVE_TS}. Run the installer, "
+            "or export them once with tools/export_vitpose.py.")
+    if requested == "vitpose_mmpose" and not mmpose_available():
         raise RuntimeError(_VITPOSE_MISSING)
     return requested
 
@@ -141,6 +175,12 @@ class PoseExtractor:
         if self._impl is not None:
             return self._impl
         if self.backend == "vitpose":
+            # Native TorchScript ViTPose-H. No mmcv, no mmengine, no compiler.
+            from pipeline.pose_native import NativeViTPose
+            self._impl = (NativeViTPose(NATIVE_TS, device=self.device),
+                          self._detector())
+            return self._impl
+        if self.backend == "vitpose_mmpose":
             # We build ViTPose through Pose2DInferencer (which resolves the model
             # alias to a config + checkpoint for us) but then use ONLY its pose
             # model, driving it with our own person boxes. See _detector().
@@ -178,10 +218,57 @@ class PoseExtractor:
         closest performance to the optimal detection for all methods".
         """
         if self.backend == "vitpose":
+            xy, conf, fps = self._extract_native(video_path, progress)
+        elif self.backend == "vitpose_mmpose":
             xy, conf, fps = self._extract_vitpose(video_path, progress)
         else:
             xy, conf, fps = self._extract_krcnn(video_path, progress=progress)
         return self._fill_gaps(xy), conf, fps
+
+    def _extract_native(self, video_path: Path, progress=None):
+        """Same batching and same detector cadence as the mmpose path — only the
+        pose network is driven directly instead of through mmpose."""
+        import cv2
+
+        net, det = self._load()
+        dev = next(det.parameters()).device
+
+        cap = cv2.VideoCapture(str(video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+
+        xs, cs = [], []
+        buf_f, buf_b, last, idx = [], [], None, 0
+        t0 = time.time()
+
+        def flush():
+            if not buf_f:
+                return
+            a, b = net(buf_f, buf_b)
+            xs.append(a); cs.append(b)
+            buf_f.clear(); buf_b.clear()
+            if progress:
+                done = sum(len(v) for v in xs)
+                progress(done, total, done / max(time.time() - t0, 1e-9))
+
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            h, w = frame.shape[:2]
+            if idx % DET_EVERY == 0 or last is None:
+                bb = self._detect_one(frame, det, dev)
+                if bb is not None:
+                    last = self._pad_box(bb, w, h)
+            buf_f.append(frame); buf_b.append(last); idx += 1
+            if len(buf_f) >= POSE_BATCH:
+                flush()
+        flush()
+        cap.release()
+
+        if not xs:
+            raise ValueError(f"no frames decoded from {video_path}")
+        return np.concatenate(xs), np.concatenate(cs), float(fps)
 
     def _detector(self):
         """Person detector — torchvision Faster R-CNN, NOT mmdet.
