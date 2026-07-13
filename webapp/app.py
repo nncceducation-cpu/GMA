@@ -12,7 +12,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,7 +22,10 @@ from pipeline.features_gma import extract_windows                       # noqa: 
 from pipeline.normalise import normalise                                # noqa: E402
 from pipeline.quality import pose_quality, protocol_gate               # noqa: E402
 from pipeline.rawstore import RawStore, sha256_file                    # noqa: E402
+from pipeline.series import compute_series                             # noqa: E402
+from webapp.figures import dashboard                                   # noqa: E402
 from webapp.learning import CP_LABELS, GMA_LABELS, Learner             # noqa: E402
+from webapp.mlexport import all_data_csv, build_bundle                 # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("neogma.web")
@@ -70,6 +73,7 @@ class Job:
     sha: str = ""
     pose_backend: str = ""
     n_windows: int = 0
+    summary: Dict = field(default_factory=dict)
     qc: Dict = field(default_factory=dict)
     gate: Dict = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
@@ -144,7 +148,7 @@ def _process(job: Job, video: Path):
                                    if i["severity"] == "ERROR"))
             return
 
-        job.stage = "features"; job.percent = 85
+        job.stage = "features"; job.percent = 80
         job.message = "Extracting windowed movement features..."
         rows = extract_windows(npose.xy, npose.fps)
         df = pd.DataFrame(rows)
@@ -154,6 +158,20 @@ def _process(job: Job, video: Path):
         df["corrected_age_weeks"] = job.corrected_age_weeks
         STORE.save_features(job.recording_id, df)
         job.n_windows = len(df)
+
+        job.stage = "series"; job.percent = 90
+        job.message = "Building movement traces and dashboard..."
+        s = compute_series(npose.xy, npose.fps)
+        rec_dir = Path(STORE.root) / "recordings" / job.recording_id
+        (rec_dir / "series.json").write_text(json.dumps(_json_safe(s)))
+        try:
+            dashboard(s, {"subject_id": job.subject_id,
+                          "corrected_age_weeks": job.corrected_age_weeks},
+                      rec_dir / "dashboard.png")
+        except Exception:
+            # A figure is a nice-to-have. It must never take the analysis down.
+            logger.exception("dashboard render failed for %s", job.recording_id)
+        job.summary = _json_safe(s["summary"])
 
         job.stage = "done"; job.percent = 100
         job.message = f"Complete — {len(df)} windows."
@@ -233,12 +251,25 @@ def status(job_id: str) -> JSONResponse:
          "elapsed": round(time.time() - j.started_at, 1)}
     if j.status == "done":
         p["qc"] = j.qc
+        p["summary"] = j.summary
         p["exports"] = {
             "windows": f"/export/{job_id}/features.parquet",
+            "windows_csv": f"/export/{job_id}/features.csv",
+            "series_csv": f"/export/{job_id}/series.csv",
             "pose_norm": f"/export/{job_id}/pose_norm.npz",
             "pose_raw": f"/export/{job_id}/pose_raw.npz",
+            "dashboard": f"/export/{job_id}/dashboard.png",
         }
     return JSONResponse(_json_safe(p))
+
+
+@app.get("/series/{rid}")
+def series(rid: str) -> JSONResponse:
+    """Per-frame traces for the interactive charts."""
+    p = STORE.root / "recordings" / rid / "series.json"
+    if not p.exists():
+        raise HTTPException(404, "No traces for this recording.")
+    return JSONResponse(json.loads(p.read_text()))
 
 
 @app.post("/label")
@@ -288,18 +319,69 @@ def memory() -> JSONResponse:
     return JSONResponse(_json_safe(LEARNER.summary()))
 
 
+@app.get("/export/dataset.zip")
+def export_dataset():
+    """THE ONE TO USE FOR MACHINE LEARNING.
+
+    Whole corpus: window features, per-frame traces, clip summaries, normalised
+    pose arrays, labels, manifest, data dictionary, and a data-quality report
+    that flags every leaky column. The README tells you the split rule before it
+    tells you anything else.
+    """
+    out = DATA_DIR / f"neogma_dataset_{time.strftime('%Y%m%d_%H%M%S')}.zip"
+    try:
+        build_bundle(STORE, LEARNER, out)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return FileResponse(str(out), media_type="application/zip", filename=out.name)
+
+
+@app.get("/export/all_data.csv")
+def export_all_csv():
+    """Every window of every recording, with labels and subject_id, in one CSV."""
+    csv = all_data_csv(STORE)
+    return Response(content=csv, media_type="text/csv",
+                    headers={"Content-Disposition":
+                             'attachment; filename="neogma_all_data.csv"'})
+
+
 @app.get("/export/{rid}/{fname}")
 def export(rid: str, fname: str):
+    d = STORE.root / "recordings" / rid
+
+    # derived-on-demand CSVs
+    if fname == "features.csv":
+        p = d / "features.parquet"
+        if not p.exists():
+            raise HTTPException(404, "Not available.")
+        return Response(content=pd.read_parquet(p).to_csv(index=False),
+                        media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="neogma_{rid}_windows.csv"'})
+    if fname == "series.csv":
+        from pipeline.series import series_frame_table
+        p = d / "series.json"
+        if not p.exists():
+            raise HTTPException(404, "Not available.")
+        s = json.loads(p.read_text())
+        return Response(content=series_frame_table(s).to_csv(index=False),
+                        media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="neogma_{rid}_frames.csv"'})
+
     allowed = {"features.parquet": "application/octet-stream",
                "pose_norm.npz": "application/octet-stream",
-               "pose_raw.npz": "application/octet-stream"}
+               "pose_raw.npz": "application/octet-stream",
+               "dashboard.png": "image/png",
+               "series.json": "application/json"}
     if fname not in allowed:
         raise HTTPException(404, "Unknown export.")
-    p = STORE.root / "recordings" / rid / fname
+    p = d / fname
     if not p.exists():
         raise HTTPException(404, "Not available.")
+    inline = fname == "dashboard.png"
     return FileResponse(str(p), media_type=allowed[fname],
-                        filename=f"neogma_{rid}_{fname}")
+                        filename=None if inline else f"neogma_{rid}_{fname}")
 
 
 @app.get("/health")
@@ -377,6 +459,18 @@ input,select{width:100%;background:#0b1220;border:1px solid #334155;color:var(--
 <div id="res" class="card" style="display:none">
   <h2 style="margin-top:0;font-size:18px">Assessment</h2>
   <div id="qc"></div>
+
+  <div id="sumbar" class="metrics" style="display:none"></div>
+
+  <h3 style="font-size:14px;margin:18px 0 6px">Movement analysis</h3>
+  <div class="note" style="margin-top:0">All traces are in <b>torso lengths per second</b> — scale,
+    rotation and frame rate are normalised out, so two infants on two phones are on the same axis.</div>
+  <div id="charts"></div>
+  <details style="margin-top:12px">
+    <summary style="cursor:pointer;color:var(--acc);font-size:13px">Static dashboard (300 DPI, publication-ready)</summary>
+    <img id="dash" style="width:100%;border-radius:10px;margin-top:10px;border:1px solid #334155">
+  </details>
+
   <h3 style="font-size:14px;margin:18px 0 6px">GMA score (certified assessor)</h3>
   <div class="lbl">
     <button class="lb present" data-l="fm_present">Fidgety PRESENT<br><span class="note">normal</span></button>
@@ -385,7 +479,13 @@ input,select{width:100%;background:#0b1220;border:1px solid #334155;color:var(--
   </div>
   <div id="lmsg" class="note"></div>
   <div id="metrics" class="metrics"></div>
-  <div id="ex" class="note" style="margin-top:14px"></div>
+
+  <h3 style="font-size:14px;margin:20px 0 6px">Export</h3>
+  <div id="ex" class="lbl"></div>
+  <div class="note" style="margin-top:4px">The dataset bundle is the one to use for machine learning:
+    window features, per-frame traces, clip summaries, normalised pose arrays, labels, a data
+    dictionary, and a quality report that flags every column that would leak. Split on
+    <code>subject_id</code> — never row-wise.</div>
   <div class="warn"><b>Research tool — not a medical device.</b> Predicts the GMA score, which is a
     <i>surrogate</i> for CP, not CP itself. Even expert GMA has a positive predictive value of ~33% at
     10% prevalence: most abnormal results are children who will not develop CP. Its strength is the
@@ -394,6 +494,82 @@ input,select{width:100%;background:#0b1220;border:1px solid #334155;color:var(--
 <script>
 const $=id=>document.getElementById(id);
 let chosen=null,jid=null;
+
+/* Charts are hand-rolled inline SVG rather than a CDN library, so the tool works
+   on an air-gapped clinical machine. Hospital networks block CDNs, and a chart
+   that silently fails to load is worse than no chart. */
+function chart(title, ylab, t, series, opts){
+  opts=opts||{};
+  const W=880,H=opts.h||150,L=48,R=12,T=22,B=24;
+  const iw=W-L-R, ih=H-T-B;
+  let lo=opts.min!==undefined?opts.min:Infinity, hi=opts.max!==undefined?opts.max:-Infinity;
+  if(lo===Infinity||hi===-Infinity){
+    series.forEach(s=>s.y.forEach(v=>{if(v!==null&&isFinite(v)){lo=Math.min(lo,v);hi=Math.max(hi,v);}}));
+    if(!isFinite(lo)){lo=0;hi=1;}
+    if(hi-lo<1e-9)hi=lo+1;
+    lo=opts.min!==undefined?opts.min:Math.min(lo,0); hi=hi*1.08;
+  }
+  const t0=t[0],t1=t[t.length-1];
+  const X=v=>L+(v-t0)/((t1-t0)||1)*iw, Y=v=>T+ih-(v-lo)/((hi-lo)||1)*ih;
+  let g='';
+  for(let i=0;i<=3;i++){const v=lo+(hi-lo)*i/3, y=Y(v);
+    g+=`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="#334155" stroke-width=".5"/>`+
+       `<text x="${L-6}" y="${y+3}" fill="#94a3b8" font-size="9" text-anchor="end">${v.toFixed(2)}</text>`;}
+  for(let i=0;i<=6;i++){const v=t0+(t1-t0)*i/6, x=X(v);
+    g+=`<text x="${x}" y="${H-6}" fill="#94a3b8" font-size="9" text-anchor="middle">${v.toFixed(0)}s</text>`;}
+  let paths='',leg='';
+  series.forEach(s=>{
+    let d='',pen=false;
+    for(let i=0;i<t.length;i++){const v=s.y[i];
+      if(v===null||!isFinite(v)){pen=false;continue;}
+      d+=(pen?'L':'M')+X(t[i]).toFixed(1)+' '+Y(v).toFixed(1)+' ';pen=true;}
+    if(s.fill)paths+=`<path d="${d}L${X(t[t.length-1])} ${Y(lo)} L${X(t0)} ${Y(lo)} Z" fill="${s.c}" opacity=".13"/>`;
+    paths+=`<path d="${d}" fill="none" stroke="${s.c}" stroke-width="${s.w||1.2}" stroke-linejoin="round"/>`;
+    if(series.length>1)leg+=`<span style="color:${s.c};margin-right:12px">■ <span style="color:#94a3b8">${s.n}</span></span>`;
+  });
+  return `<div style="margin:14px 0 4px">
+    <div style="font-size:12.5px;color:#e2e8f0;margin-bottom:2px">${title}</div>
+    <div style="font-size:11px;color:#94a3b8">${opts.sub||''} ${leg?'<span style="float:right">'+leg+'</span>':''}</div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:9px;margin-top:5px">
+      <text x="4" y="12" fill="#94a3b8" font-size="9">${ylab}</text>${g}${paths}</svg></div>`;
+}
+
+async function drawCharts(rid){
+  const s=await (await fetch('/series/'+rid)).json();
+  const t=s.t, C={la:'#38bdf8',ra:'#818cf8',ll:'#34d399',rl:'#fbbf24'};
+  let h='';
+  h+=chart('Distal movement speed — wrists + ankles','torso/s',t,
+      [{y:s.distal_speed,c:'#38bdf8',fill:1,n:'distal'}],
+      {h:160,min:0,sub:'Fidgety movements are distal. This is the headline trace.'});
+  h+=chart('Limb speed','torso/s',t,
+      [{y:s.left_arm,c:C.la,n:'left arm'},{y:s.right_arm,c:C.ra,n:'right arm'},
+       {y:s.left_leg,c:C.ll,n:'left leg'},{y:s.right_leg,c:C.rl,n:'right leg'}],
+      {h:160,min:0,sub:'A limb that stays flat while the others move is an asymmetry sign.'});
+  h+=chart('Fraction of distal joints at fidgety amplitude','fraction',t,
+      [{y:s.small_amp_frac,c:'#34d399',fill:1,n:'small amp'}],
+      {h:130,min:0,max:1,sub:'Continuous and high = fidgety present. Near zero = absent.'});
+  h+=chart('Movement-direction change (the fidgety signature)','rad/frame',t,
+      [{y:s.direction_change,c:'#c084fc',n:'dir change'}],
+      {h:130,min:0,sub:'Fidgety movement wanders in direction; stereotyped movement does not.'});
+  if(s.fidgety_t&&s.fidgety_t.length)
+    h+=chart('Share of movement power in the fidgety band (0.5–6 Hz)','power share',
+      s.fidgety_t,[{y:s.fidgety_power,c:'#f472b6',fill:1,n:'band power'}],
+      {h:130,min:0,max:1,sub:'Rolling 2 s window.'});
+  $('charts').innerHTML=h;
+
+  const u=s.summary, bal=u.lr_balance;
+  const asym=Math.abs(bal-0.5)>0.12;
+  $('sumbar').style.display='block';
+  $('sumbar').innerHTML=
+    '<div class="mrow"><span>Distal speed (mean)</span><b>'+u.distal_speed_mean.toFixed(3)+' torso/s</b></div>'+
+    '<div class="mrow"><span>Time at fidgety amplitude</span><b>'+(u.small_amp_fraction*100).toFixed(0)+'%</b></div>'+
+    '<div class="mrow"><span>Direction change (mean)</span><b>'+u.direction_change_mean.toFixed(3)+' rad/frame</b></div>'+
+    '<div class="mrow"><span>Fidgety-band power</span><b>'+(u.fidgety_power_mean==null?'—':(u.fidgety_power_mean*100).toFixed(0)+'%')+'</b></div>'+
+    '<div class="mrow"><span>Left/right balance</span><b style="color:'+(asym?'#fbbf24':'#34d399')+'">'+
+      bal.toFixed(2)+(asym?' — asymmetric':' — symmetric')+'</b></div>'+
+    '<div class="note" style="margin-top:8px">These are descriptive measurements, not a diagnosis. '+
+      'The GMA score below is yours to make.</div>';
+}
 $('drop').onclick=()=>$('file').click();
 $('file').onchange=()=>{if($('file').files[0]){chosen=$('file').files[0];$('fn').textContent=chosen.name;check();}};
 ['dragover','drop'].forEach(e=>$('drop').addEventListener(e,ev=>{ev.preventDefault();
@@ -452,9 +628,18 @@ async function poll(){
     if(s.qc.issues&&s.qc.issues.length)q+='<div class="warn">'+s.qc.issues.map(i=>'<b>'+i.severity+'</b> '+i.detail).join('<br>')+'</div>';
     $('qc').innerHTML=q;
     const e=s.exports||{};
-    $('ex').innerHTML='Raw data retained: <a style="color:#38bdf8" href="'+e.windows+'">window features</a> · '+
-      '<a style="color:#38bdf8" href="'+e.pose_norm+'">normalised pose</a> · '+
-      '<a style="color:#38bdf8" href="'+e.pose_raw+'">raw keypoints</a> — kept for unsupervised re-analysis.';
+    const B=(href,t,sub)=>'<a class="lb" style="text-decoration:none;display:block" href="'+href+'">'+
+      t+'<br><span class="note">'+sub+'</span></a>';
+    $('ex').innerHTML=
+      B('/export/dataset.zip','ML dataset bundle','whole corpus · parquet + csv + pose + docs')+
+      B('/export/all_data.csv','All data (one CSV)','every window, every recording, with labels')+
+      B(e.windows_csv,'This clip — windows','the design matrix, '+s.n_windows+' rows')+
+      B(e.series_csv,'This clip — per frame','continuous traces')+
+      B(e.pose_norm,'This clip — normalised pose','[T,17,2] torso units — for SSL')+
+      B(e.dashboard,'Dashboard PNG','300 DPI, publication-ready');
+    $('dash').src=e.dashboard;
+    drawCharts(jid).catch(err=>{$('charts').innerHTML=
+      '<div class="warn">Charts unavailable: '+err+'</div>';});
     $('res').style.display='block';return;}
   setTimeout(poll,900);
 }
