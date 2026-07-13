@@ -250,12 +250,25 @@ def build_bundle(store, learner, out_path: Path) -> Path:
     return out_path
 
 
-def all_data_csv(store) -> str:
-    """Everything joined into ONE flat CSV — window features + labels + subject."""
+def all_data_csv(store, recording_ids: Optional[List[str]] = None) -> str:
+    """Everything joined into ONE flat CSV — window features + labels + subject.
+
+    `recording_ids=None` gives the whole corpus (the cumulative export). Pass a
+    list to scope it down — one clip, say. The column layout is identical either
+    way, so a single-clip file and the corpus file can be concatenated, diffed or
+    fed to the same analysis code without any reshaping.
+    """
     man = store.manifest()
+    if man.empty:
+        return "no recordings stored yet\n"
+    if recording_ids is not None:
+        man = man[man.recording_id.isin(list(recording_ids))]
+        if man.empty:
+            return "no such recording\n"
+
     parts = []
     for _, r in man.iterrows():
-        fp = store.root / "recordings" / r["recording_id"] / "features.parquet"
+        fp = Path(store.root) / "recordings" / r["recording_id"] / "features.parquet"
         if not fp.exists():
             continue
         w = pd.read_parquet(fp)
@@ -265,9 +278,126 @@ def all_data_csv(store) -> str:
         parts.append(w)
     if not parts:
         return "no recordings with features yet\n"
+
     df = pd.concat(parts, ignore_index=True)
     front = [c for c in [GROUP_COL, "recording_id", "gma_label", "cp_status",
-                         "protocol_compliant", "site", "corrected_age_weeks"]
+                         "protocol_compliant", "site", "corrected_age_weeks",
+                         "duplicate_of", "subject_id_conflict"]
              if c in df.columns]
     rest = [c for c in df.columns if c not in front]
     return df[front + rest].to_csv(index=False)
+
+
+def last_recording_id(store) -> Optional[str]:
+    """The most recently INGESTED recording — i.e. the clip you just analysed.
+
+    Sorted on `ingested_at`, with manifest row order as the tie-break: two clips
+    uploaded inside the same second sort identically on the timestamp alone, and
+    the later row is the later upload.
+    """
+    man = store.manifest()
+    if man.empty or "recording_id" not in man:
+        return None
+    m = man.reset_index().rename(columns={"index": "_row"})
+    if "ingested_at" in m:
+        m["_t"] = pd.to_datetime(m["ingested_at"], errors="coerce")
+        m = m.sort_values(["_t", "_row"], na_position="first")
+    return str(m.iloc[-1]["recording_id"])
+
+
+def clip_bundle(store, rid: str, out_path: Path) -> Path:
+    """Every level of raw data for ONE recording, zipped.
+
+    The flat CSV gives you L3 (windows). This gives you the whole ladder for a
+    single clip — L1 raw keypoints, L2 normalised pose, per-frame traces, the
+    window design matrix, and the manifest row that says which infant it came
+    from and whether it duplicates something already in the store.
+
+    The VIDEO is deliberately not included. It is identifiable health data and it
+    does not belong in a file you might email or drop in a shared folder.
+    Everything here is derived and carries no image of the infant.
+    """
+    from pipeline.series import compute_series, series_frame_table
+
+    man = store.manifest()
+    row = man[man.recording_id == rid] if not man.empty else pd.DataFrame()
+    if row.empty:
+        raise ValueError(f"unknown recording: {rid}")
+    r = row.iloc[0]
+    d = Path(store.root) / "recordings" / rid
+
+    out_path = Path(out_path)
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
+        fp = d / "features.parquet"
+        if fp.exists():
+            w = pd.read_parquet(fp)
+            for c in man.columns:
+                if c not in w.columns:
+                    w[c] = r.get(c)
+            z.writestr("windows.csv", w.to_csv(index=False))
+            z.writestr("windows.parquet", fp.read_bytes())
+            z.writestr("data_quality.csv", _dq(w).to_csv(index=False))
+
+        got = store.load_pose(rid, "L2")
+        if got is not None:
+            xy, conf, fps = got
+            ser = compute_series(xy, fps)
+            z.writestr("frames.csv", series_frame_table(ser).to_csv(index=False))
+            z.writestr("summary.json", json.dumps(
+                {"recording_id": rid,
+                 "subject_id": r.get("subject_id"),
+                 "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                 "duration_s": ser["duration_s"],
+                 "n_frames": ser["n_frames"],
+                 **ser["summary"]}, indent=2, default=str))
+
+        for name in ("pose_norm.npz", "pose_raw.npz", "dashboard.png",
+                     "series.json"):
+            f = d / name
+            if f.exists():
+                z.writestr(name, f.read_bytes())
+
+        z.writestr("manifest_row.csv", row.to_csv(index=False))
+        z.writestr("data_dictionary.csv",
+                   pd.DataFrame(DICT_ROWS, columns=["column", "meaning"])
+                   .to_csv(index=False))
+
+        dup = r.get("duplicate_of")
+        dup_note = ""
+        if isinstance(dup, str) and dup and dup.lower() != "nan":
+            dup_note = (
+                "\n## WARNING — duplicate content\n\n"
+                f"This video is byte-identical to recording `{dup}` "
+                f"(subject `{r.get('duplicate_of_subject')}`). It was re-analysed, not\n"
+                "refused. Do not put both into a training set: the same infant on both\n"
+                "sides of a split inflates every metric.\n")
+
+        z.writestr("README.md", f"""# NeoGMA — single clip export
+
+    recording_id       : {rid}
+    subject_id         : {r.get('subject_id')}
+    ingested_at        : {r.get('ingested_at')}
+    duration_s         : {r.get('duration_s')}
+    protocol_compliant : {r.get('protocol_compliant')}
+    pose_backend       : {r.get('pose_backend')}
+
+| file | one row per | level |
+|---|---|---|
+| `windows.csv` / `.parquet` | 5 s window | L3 — the design matrix |
+| `frames.csv` | frame | per-frame traces behind the charts |
+| `pose_norm.npz` | recording | L2 — normalised pose [T,17,2], torso units |
+| `pose_raw.npz` | recording | L1 — raw keypoints + confidence, in PIXELS |
+| `manifest_row.csv` | recording | subject, age, site, labels, QC, duplicate link |
+| `data_quality.csv` | column | missingness, constants, leaky flags |
+
+Pose is normalised: torso length = 1, head-up, common frame rate. Speeds are in
+torso lengths per second, not pixels. Use `pose_norm.npz` for modelling;
+`pose_raw.npz` is kept for reproducibility, and a model trained on raw pixels
+learns the camera.
+
+The video itself is NOT in this bundle — it stays on the machine.
+
+One clip is not a dataset. For modelling use `/export/dataset.zip`, and split by
+`subject_id`, never row-wise.
+{dup_note}""")
+    return out_path

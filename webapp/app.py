@@ -25,7 +25,8 @@ from pipeline.rawstore import RawStore, sha256_file                    # noqa: E
 from pipeline.series import compute_series                             # noqa: E402
 from webapp.figures import dashboard                                   # noqa: E402
 from webapp.learning import CP_LABELS, GMA_LABELS, Learner             # noqa: E402
-from webapp.mlexport import all_data_csv, build_bundle                 # noqa: E402
+from webapp.mlexport import (all_data_csv, build_bundle, clip_bundle,   # noqa: E402
+                             last_recording_id)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("neogma.web")
@@ -267,6 +268,10 @@ def status(job_id: str) -> JSONResponse:
             "pose_norm": f"/export/{job_id}/pose_norm.npz",
             "pose_raw": f"/export/{job_id}/pose_raw.npz",
             "dashboard": f"/export/{job_id}/dashboard.png",
+            # THIS CLIP ONLY — the cumulative all_data.csv is the wrong shape for
+            # "what did this baby do". Same columns, one recording.
+            "clip_csv": f"/export/{job_id}/all_data.csv",
+            "clip_zip": f"/export/{job_id}/clip.zip",
         }
     return JSONResponse(_json_safe(p))
 
@@ -346,16 +351,94 @@ def export_dataset():
 
 @app.get("/export/all_data.csv")
 def export_all_csv():
-    """Every window of every recording, with labels and subject_id, in one CSV."""
+    """Every window of every recording, with labels and subject_id, in one CSV.
+
+    CUMULATIVE, and that is the trap: it grows with the store and it happily
+    contains two re-analyses of the same video under different subject IDs. For
+    the clip you just ran, use /export/last/all_data.csv.
+    """
     csv = all_data_csv(STORE)
     return Response(content=csv, media_type="text/csv",
                     headers={"Content-Disposition":
                              'attachment; filename="neogma_all_data.csv"'})
 
 
+def _last_rid() -> str:
+    rid = last_recording_id(STORE)
+    if not rid:
+        raise HTTPException(404, "Nothing analysed yet.")
+    return rid
+
+
+# NOTE: these three must be declared BEFORE /export/{rid}/{fname}, or "last"
+# is swallowed as a recording_id by the catch-all route.
+@app.get("/export/last/all_data.csv")
+def export_last_csv():
+    """JUST THE CLIP YOU LAST ANALYSED — same columns as the cumulative CSV.
+
+    Identical schema, one recording. It drops straight into whatever code already
+    reads neogma_all_data.csv, without a filter step you have to remember.
+    """
+    rid = _last_rid()
+    csv = all_data_csv(STORE, recording_ids=[rid])
+    return Response(content=csv, media_type="text/csv",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="neogma_{rid}_all_data.csv"'})
+
+
+@app.get("/export/last/clip.zip")
+def export_last_bundle():
+    """Every level of raw data for the last clip: windows, frames, L1 + L2 pose."""
+    rid = _last_rid()
+    out = DATA_DIR / f"neogma_clip_{rid}.zip"
+    try:
+        clip_bundle(STORE, rid, out)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return FileResponse(str(out), media_type="application/zip",
+                        filename=f"neogma_{rid}_clip.zip")
+
+
+@app.get("/export/last/id")
+def export_last_id() -> JSONResponse:
+    """Which recording /export/last/* currently points at — and whether it is a
+    duplicate of one already in the store."""
+    rid = _last_rid()
+    man = STORE.manifest()
+    r = man[man.recording_id == rid].iloc[0].to_dict()
+    return JSONResponse(_json_safe({
+        "recording_id": rid,
+        "subject_id": r.get("subject_id"),
+        "ingested_at": r.get("ingested_at"),
+        "duration_s": r.get("duration_s"),
+        "duplicate_of": r.get("duplicate_of"),
+        "duplicate_of_subject": r.get("duplicate_of_subject"),
+        "subject_id_conflict": r.get("subject_id_conflict"),
+    }))
+
+
 @app.get("/export/{rid}/{fname}")
 def export(rid: str, fname: str):
     d = STORE.root / "recordings" / rid
+
+    # One clip, flat, manifest metadata joined on — the same schema as the
+    # cumulative all_data.csv, filtered to a single recording.
+    if fname == "all_data.csv":
+        csv = all_data_csv(STORE, recording_ids=[rid])
+        if csv.startswith("no such recording"):
+            raise HTTPException(404, "Unknown recording.")
+        return Response(content=csv, media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="neogma_{rid}_all_data.csv"'})
+
+    if fname == "clip.zip":
+        out = DATA_DIR / f"neogma_clip_{rid}.zip"
+        try:
+            clip_bundle(STORE, rid, out)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return FileResponse(str(out), media_type="application/zip",
+                            filename=f"neogma_{rid}_clip.zip")
 
     # derived-on-demand CSVs
     if fname == "features.csv":
@@ -661,8 +744,10 @@ async function poll(){
     const B=(href,t,sub)=>'<a class="lb" style="text-decoration:none;display:block" href="'+href+'">'+
       t+'<br><span class="note">'+sub+'</span></a>';
     $('ex').innerHTML=
+      B(e.clip_csv,'★ This clip — all data (CSV)','ONLY the clip just analysed · same columns as the full export')+
+      B(e.clip_zip,'★ This clip — raw bundle (ZIP)','windows + frames + normalised & raw pose + manifest row')+
       B('/export/dataset.zip','ML dataset bundle','whole corpus · parquet + csv + pose + docs')+
-      B('/export/all_data.csv','All data (one CSV)','every window, every recording, with labels')+
+      B('/export/all_data.csv','All data (one CSV)','CUMULATIVE — every window of every recording ever ingested')+
       B(e.windows_csv,'This clip — windows','the design matrix, '+s.n_windows+' rows')+
       B(e.series_csv,'This clip — per frame','continuous traces')+
       B(e.pose_norm,'This clip — normalised pose','[T,17,2] torso units — for SSL')+
