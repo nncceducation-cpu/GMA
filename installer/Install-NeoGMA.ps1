@@ -30,10 +30,17 @@ $ModelDir = Join-Path $Root "models"
 $ModelTs  = Join-Path $ModelDir "vitpose_h.ts"
 $RunsDir  = Join-Path $Root "runs"
 
-# Where the weights live. Replace with your GitHub release asset URL.
+# Where the weights live.
+#
+# This points at the PUBLIC GMAweb repo, not the private GMA one, and that is
+# deliberate: release assets on a private repository cannot be downloaded without
+# a GitHub token, so every centre would hit a 404 and the "one-click" install
+# would need a credential handed out by email. The model itself is not patient
+# data — it is derived from OpenMMLab's Apache-2.0 ViTPose weights — so it can
+# live in the open while the clinical code stays private.
 $ModelUrl = $env:NEOGMA_MODEL_URL
 if (-not $ModelUrl) {
-  $ModelUrl = "https://github.com/nncceducation-cpu/GMA/releases/download/v0.1/vitpose_h.ts"
+  $ModelUrl = "https://github.com/nncceducation-cpu/GMAweb/releases/download/v0.1/vitpose_h.ts"
 }
 
 function Say($msg, $colour = "Cyan") { Write-Host "  $msg" -ForegroundColor $colour }
