@@ -109,8 +109,22 @@ def _process(job: Job, video: Path):
         pose._load()
 
         job.stage = "pose"; job.percent = 10
-        job.message = f"Estimating infant pose ({POSE_LABEL[pose.backend]})..."
-        xy, conf, src_fps = pose.extract(video)
+        label = POSE_LABEL[pose.backend]
+        job.message = f"Estimating infant pose ({label})..."
+
+        def on_pose(done, total, rate):
+            # Pose is 90% of the wall clock, so it owns 10-55% of the bar. A bar
+            # that does not move is read as a crash — and the user is right to
+            # read it that way.
+            if total:
+                job.percent = 10 + 45.0 * min(done / total, 1.0)
+                eta = (total - done) / rate if rate > 0 else 0
+                job.message = (f"{label}: frame {done:,}/{total:,} "
+                               f"({rate:.0f} fps, ~{eta/60:.1f} min left)")
+            else:
+                job.message = f"{label}: {done:,} frames ({rate:.0f} fps)"
+
+        xy, conf, src_fps = pose.extract(video, progress=on_pose)
         STORE.save_pose(job.recording_id, xy, conf, src_fps, level="L1")
         # The backend is provenance. Mixing backends within a cohort is a site
         # effect under another name, and probes.py will flag it as one.
