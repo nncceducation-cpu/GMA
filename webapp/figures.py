@@ -48,8 +48,13 @@ def dashboard(series: Dict, meta: Dict, out_path: Path,
     sub = meta.get("subject_id", "?")
     age = meta.get("corrected_age_weeks", "?")
     head = f"NeoGMA — {sub} · {age} weeks corrected · {series['duration_s']:.0f}s"
-    if label:
+    # An unlabelled recording arrives here as a float NaN from the manifest, not
+    # as None, and `if label:` happily lets NaN through — printing "expert label:
+    # nan" on a figure that might end up in a manuscript.
+    if isinstance(label, str) and label.strip() and label.lower() != "nan":
         head += f" · expert label: {label}"
+    else:
+        head += " · unlabelled"
     fig.suptitle(head, color=FG, fontsize=13, x=0.02, ha="left", y=0.985)
 
     gs = fig.add_gridspec(4, 2, hspace=0.55, wspace=0.22,
