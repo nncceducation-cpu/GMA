@@ -14,6 +14,17 @@ models/*.zip
 # pose keypoints are still identifiable movement data
 *.npy
 *.npz
+# FIGURES AND TRACES ARE PATIENT DATA TOO. A dashboard PNG carries the subject
+# ID and that infant's movement traces. It is derived from the video, so it
+# inherits the video's governance. One slipped into this repo before this rule
+# existed and had to be purged from history.
+*.png
+*.jpg
+*.svg
+*.pdf
+series.json
+dashboard.png
+!docs/*.png
 
 # Python
 __pycache__/
