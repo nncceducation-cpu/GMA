@@ -364,7 +364,12 @@ input,select{width:100%;background:#0b1220;border:1px solid #334155;color:var(--
     <div class="note">supine · top-down · nappy only · no pacifier/toys/interaction · 60–120 s</div>
     <input id="file" type="file" accept="video/*" style="display:none"></div>
   <button id="go" class="btn" disabled>Analyse</button> <span id="fn" class="note"></span>
-  <div id="prog" style="display:none"><div class="bar"><i id="pb"></i></div>
+  <div id="prog" style="display:none">
+    <div style="display:flex;align-items:center;gap:12px">
+      <div class="bar" style="flex:1"><i id="pb"></i></div>
+      <b id="ppct" style="min-width:46px;text-align:right;color:var(--acc);
+         font-variant-numeric:tabular-nums">0%</b>
+    </div>
     <div id="pmsg" class="note"></div></div>
   <div id="msg"></div>
 </div>
@@ -401,7 +406,8 @@ async function mem(){const m=await (await fetch('/memory')).json();
 mem();
 $('go').onclick=async()=>{
   $('go').disabled=true;$('res').style.display='none';$('msg').innerHTML='';
-  $('prog').style.display='block';$('pb').style.width='5%';$('pmsg').textContent='Uploading…';
+  $('prog').style.display='block';$('pb').style.width='5%';
+  $('ppct').textContent='5%';$('pmsg').textContent='Uploading…';
   const fd=new FormData();fd.append('file',chosen);fd.append('subject_id',$('sid').value.trim());
   fd.append('corrected_age_weeks',$('age').value);fd.append('site',$('site').value);
   fd.append('risk_group',$('risk').value);
@@ -434,7 +440,9 @@ $('go').onclick=async()=>{
 };
 async function poll(){
   const s=await (await fetch('/status/'+jid)).json();
-  $('pb').style.width=(s.percent||0)+'%';$('pmsg').textContent=s.message||s.stage;
+  const pc=s.percent||0;
+  $('pb').style.width=pc+'%';$('ppct').textContent=pc.toFixed(0)+'%';
+  $('pmsg').textContent=s.message||s.stage;
   if(s.status==='error'){$('prog').style.display='none';$('go').disabled=false;
     $('msg').innerHTML='<div class="warn"><b>Failed.</b><br><span class="err">'+s.error+'</span></div>';return;}
   if(s.status==='done'){
