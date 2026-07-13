@@ -95,17 +95,21 @@ class RawStore:
                corrected_age_weeks: float, site: str = "",
                camera_model: str = "", risk_group: str = "",
                extra: Optional[Dict] = None) -> Dict:
-        """Store L0. Refuses a byte-identical duplicate under a NEW subject."""
+        """Store L0.
+
+        A re-upload of a byte-identical video is ANALYSED, not refused — you may
+        legitimately want to re-run it after a pipeline change, or simply look at
+        it again. But it is recorded as a duplicate, because the danger was never
+        the analysis; it was the TRAINING SET. The same infant appearing twice —
+        or worse, the same video filed under two subject IDs — silently breaks
+        every subject-level split and inflates every metric. So the link is kept
+        here, and `Learner.add` uses it to refuse a second copy into memory.
+
+        Analyse freely; train once.
+        """
         video = Path(video)
         sha = sha256_file(video)
-
         dup = self.find_by_hash(sha)
-        if dup and str(dup.get("subject_id")) != str(subject_id):
-            raise ValueError(
-                f"This video is byte-identical to a recording already stored for "
-                f"subject '{dup.get('subject_id')}'. Storing it under "
-                f"'{subject_id}' would make one infant look like two, and no "
-                "subject-level split can undo that.")
 
         d = self.root / "recordings" / recording_id
         d.mkdir(parents=True, exist_ok=True)
@@ -123,6 +127,11 @@ class RawStore:
             "risk_group": risk_group,          # e.g. HIE / preterm / IVH
             "ingested_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "video_file": dst.name,
+            # Provenance of a re-upload. Null for an original.
+            "duplicate_of": dup.get("recording_id") if dup else None,
+            "duplicate_of_subject": dup.get("subject_id") if dup else None,
+            "subject_id_conflict": bool(
+                dup and str(dup.get("subject_id")) != str(subject_id)),
             # labels, filled in later — nullable by design
             "gma_label": None,                 # fm_present / fm_absent / fm_abnormal
             "gma_scored_by": None,

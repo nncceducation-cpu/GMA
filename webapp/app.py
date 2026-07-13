@@ -74,6 +74,7 @@ class Job:
     pose_backend: str = ""
     n_windows: int = 0
     summary: Dict = field(default_factory=dict)
+    duplicate_of: Optional[Dict] = None
     qc: Dict = field(default_factory=dict)
     gate: Dict = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
@@ -213,27 +214,34 @@ async def upload(file: UploadFile = File(...),
                                   "warnings": gate["warnings"]})
 
     sha = sha256_file(tmp)
-    dup = LEARNER.find_duplicate(sha)
+    prior = STORE.find_by_hash(sha)
 
-    try:
-        rec = STORE.ingest(video=tmp, subject_id=subject_id, recording_id=rid,
-                           corrected_age_weeks=corrected_age_weeks, site=site,
-                           risk_group=risk_group,
-                           extra={"duration_s": gate["duration_s"],
-                                  "protocol_compliant": gate["protocol_compliant"]})
-    except ValueError as exc:
-        # The duplicate guard lives here: the same video under a second subject
-        # id would make one infant look like two and silently break every
-        # subject-level split. It must REFUSE — but it must also say so. Letting
-        # this escape as a 500 left the UI showing "Uploading..." forever, which
-        # is the one outcome worse than a refusal: a refusal nobody can see.
-        tmp.unlink(missing_ok=True)
-        raise HTTPException(409, {"blocking": [str(exc)], "warnings": []})
-    finally:
-        tmp.unlink(missing_ok=True)
+    # A re-upload is ANALYSED, not refused. The risk was never in looking at a
+    # clip twice — it is in TRAINING on it twice, or in the same infant entering
+    # the training set under two subject IDs. So we re-run, say clearly that this
+    # is the same clip, and keep the guard where it belongs: at /label.
+    rec = STORE.ingest(video=tmp, subject_id=subject_id, recording_id=rid,
+                       corrected_age_weeks=corrected_age_weeks, site=site,
+                       risk_group=risk_group,
+                       extra={"duration_s": gate["duration_s"],
+                              "protocol_compliant": gate["protocol_compliant"]})
+    tmp.unlink(missing_ok=True)
+
+    dup = None
+    if prior:
+        conflict = str(prior.get("subject_id")) != str(subject_id)
+        dup = {
+            "recording_id": prior.get("recording_id"),
+            "subject_id": prior.get("subject_id"),
+            "ingested_at": prior.get("ingested_at"),
+            "gma_label": prior.get("gma_label"),
+            "subject_id_conflict": conflict,
+            "in_training_memory": LEARNER.find_duplicate(sha) is not None,
+        }
 
     job = Job(id=rid, recording_id=rid, subject_id=subject_id, sha=sha,
-              site=site, corrected_age_weeks=corrected_age_weeks, gate=gate)
+              site=site, corrected_age_weeks=corrected_age_weeks, gate=gate,
+              duplicate_of=dup)
     JOBS[rid] = job
     threading.Thread(target=_process, args=(job, Path(STORE.root) / "recordings" / rid / rec["video_file"]),
                      daemon=True).start()
@@ -607,10 +615,32 @@ $('go').onclick=async()=>{
       (d.blocking?d.blocking.join('<br>'):JSON.stringify(d))+'</div>';
     $('prog').style.display='none';$('go').disabled=false;return;}
   let pre='';
+  const d=j.duplicate_of;
+  if(d){
+    if(d.subject_id_conflict){
+      /* The dangerous case: same video, two subject IDs. Analysis still runs,
+         but this must not enter training memory — one infant under two IDs
+         cannot be undone by any split. */
+      pre+='<div class="warn" style="border-color:#f87171">'+
+        '<b>⚠ Same clip — but under a DIFFERENT subject ID.</b><br>'+
+        'This exact video is already stored as <b>'+d.recording_id+'</b> under subject <b>'+
+        d.subject_id+'</b> (uploaded '+(d.ingested_at||'earlier')+'). You are filing it as <b>'+
+        $('sid').value.trim()+'</b>.<br><br>Re-running the analysis anyway. But one of those IDs '+
+        'is a typo, and the same infant under two IDs breaks every subject-level split and '+
+        'inflates every metric. <b>Labelling it will be refused</b> until the IDs agree.</div>';
+    }else{
+      pre+='<div class="warn" style="background:#1e293b;border-color:#38bdf8;color:#e2e8f0">'+
+        '<b>Same clip as before — re-analysing.</b><br>'+
+        'Byte-identical to <b>'+d.recording_id+'</b> (subject '+d.subject_id+', uploaded '+
+        (d.ingested_at||'earlier')+')'+
+        (d.gma_label?', already scored <b>'+d.gma_label+'</b>':'')+'. '+
+        'Results will refresh'+(d.in_training_memory?
+          '. Labelling it again REPLACES the old entry rather than adding a second copy — '+
+          'the same clip must never count twice for one infant.':'.')+'</div>';
+    }
+  }
   if(j.gate&&j.gate.warnings&&j.gate.warnings.length)
     pre+='<div class="warn"><b>Accepted with warnings.</b><br>'+j.gate.warnings.join('<br>')+'</div>';
-  if(j.duplicate_of)
-    pre+='<div class="warn">This video is byte-identical to a recording already stored for subject <b>'+j.duplicate_of.subject_id+'</b>.</div>';
   $('msg').innerHTML=pre;
   jid=j.job_id;poll();
 };

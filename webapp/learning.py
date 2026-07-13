@@ -65,12 +65,19 @@ class Learner:
             gma_label: Optional[str] = None, cp_status: Optional[str] = None,
             content_sha256: str = "", meta: Optional[Dict] = None) -> Dict:
         dup = self.find_duplicate(content_sha256)
+
+        # SAME VIDEO, DIFFERENT SUBJECT ID -> refuse. This is the unrecoverable
+        # one. One infant present under two IDs cannot be undone by any
+        # subject-level split; the model trains on a baby and is then tested on
+        # the same baby, and every number you report is inflated.
         if dup and str(dup.get("subject_id")) != str(subject_id):
             raise ValueError(
-                f"Byte-identical to a recording already stored for subject "
-                f"'{dup.get('subject_id')}'. Storing it under '{subject_id}' "
-                "would make one infant look like two, and no subject-level split "
-                "can undo that.")
+                f"This clip is already in training memory under subject "
+                f"'{dup.get('subject_id')}'. You are filing it under "
+                f"'{subject_id}'. One of those is a typo — the same infant under "
+                "two IDs breaks every subject-level split and inflates every "
+                "metric. Fix the ID, or relabel the original recording.")
+
         meta = meta or {}
         with _LOCK:
             w = windows.copy()
@@ -78,17 +85,27 @@ class Learner:
             w["subject_id"] = str(subject_id)
             w["gma_label"] = gma_label
             w["cp_status"] = cp_status
+            w["content_sha256"] = content_sha256
             for k, v in meta.items():
                 w[k] = v
+
             store = self._read(self.features_csv)
             if not store.empty and "recording_id" in store:
                 store = store[store.recording_id != recording_id]
+            # SAME VIDEO, SAME SUBJECT -> re-label, do not re-add. A re-upload
+            # gets a fresh recording_id, so without this the identical windows
+            # would be counted twice for one infant: it would look like more
+            # evidence than exists, and weight that infant double in training.
+            if dup and not store.empty and "content_sha256" in store:
+                store = store[store.content_sha256.astype(str) != str(content_sha256)]
             pd.concat([store, w], ignore_index=True, sort=False).to_csv(
                 self.features_csv, index=False)
 
             man = self._read(self.manifest_csv)
             if not man.empty and "recording_id" in man:
                 man = man[man.recording_id != recording_id]
+            if dup and not man.empty and "content_sha256" in man:
+                man = man[man.content_sha256.astype(str) != str(content_sha256)]
             row = {"recording_id": recording_id, "subject_id": str(subject_id),
                    "content_sha256": content_sha256, "gma_label": gma_label,
                    "cp_status": cp_status, "n_windows": int(len(w)),
