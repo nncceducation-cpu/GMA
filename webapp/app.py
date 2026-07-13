@@ -183,12 +183,22 @@ async def upload(file: UploadFile = File(...),
     sha = sha256_file(tmp)
     dup = LEARNER.find_duplicate(sha)
 
-    rec = STORE.ingest(video=tmp, subject_id=subject_id, recording_id=rid,
-                       corrected_age_weeks=corrected_age_weeks, site=site,
-                       risk_group=risk_group,
-                       extra={"duration_s": gate["duration_s"],
-                              "protocol_compliant": gate["protocol_compliant"]})
-    tmp.unlink(missing_ok=True)
+    try:
+        rec = STORE.ingest(video=tmp, subject_id=subject_id, recording_id=rid,
+                           corrected_age_weeks=corrected_age_weeks, site=site,
+                           risk_group=risk_group,
+                           extra={"duration_s": gate["duration_s"],
+                                  "protocol_compliant": gate["protocol_compliant"]})
+    except ValueError as exc:
+        # The duplicate guard lives here: the same video under a second subject
+        # id would make one infant look like two and silently break every
+        # subject-level split. It must REFUSE — but it must also say so. Letting
+        # this escape as a 500 left the UI showing "Uploading..." forever, which
+        # is the one outcome worse than a refusal: a refusal nobody can see.
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(409, {"blocking": [str(exc)], "warnings": []})
+    finally:
+        tmp.unlink(missing_ok=True)
 
     job = Job(id=rid, recording_id=rid, subject_id=subject_id, sha=sha,
               site=site, corrected_age_weeks=corrected_age_weeks, gate=gate)
@@ -381,8 +391,21 @@ $('go').onclick=async()=>{
   const fd=new FormData();fd.append('file',chosen);fd.append('subject_id',$('sid').value.trim());
   fd.append('corrected_age_weeks',$('age').value);fd.append('site',$('site').value);
   fd.append('risk_group',$('risk').value);
-  const r=await fetch('/upload',{method:'POST',body:fd});
-  const j=await r.json();
+  let r,j;
+  // Any failure must SURFACE. A 500, a dropped connection or a non-JSON body
+  // used to leave this spinner on "Uploading..." indefinitely, which is
+  // indistinguishable from a hang and hides the very refusals the tool exists
+  // to make.
+  try{
+    r=await fetch('/upload',{method:'POST',body:fd});
+    j=await r.json();
+  }catch(e){
+    $('prog').style.display='none';$('go').disabled=false;
+    $('msg').innerHTML='<div class="warn"><b>Upload failed.</b><br>'+
+      '<span class="err">'+e+'</span><br>The server may have restarted — check '+
+      '<code>docker compose logs neogma</code>.</div>';
+    return;
+  }
   if(!r.ok){const d=j.detail;
     $('msg').innerHTML='<div class="warn"><b>Refused.</b><br>'+
       (d.blocking?d.blocking.join('<br>'):JSON.stringify(d))+'</div>';

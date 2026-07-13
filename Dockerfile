@@ -30,12 +30,22 @@ RUN pip install --no-cache-dir --index-url ${TORCH_INDEX} ${TORCH_SPEC}
 # `mim` itself.
 #
 # PIP_CONSTRAINT is honoured by every later pip invocation, including the ones
-# mim shells out to, so these three packages simply cannot move again. Note that
-# `torch==2.11.0` matches `2.11.0+cu128` (PEP 440: a specifier with no local
-# version matches any local version), so this pins the version without fighting
-# the CUDA tag.
-RUN printf 'torch==2.11.0\ntorchvision==0.26.0\nsetuptools<81\n' > /etc/pip-constraints.txt
-ENV PIP_CONSTRAINT=/etc/pip-constraints.txt
+# mim shells out to.
+#
+# The pins carry the +cu128 LOCAL VERSION on purpose. Pinning bare `==0.26.0`
+# is not enough and fails in a nasty way: pip does not treat an installed
+# `0.26.0+cu128` as satisfying `==0.26.0`, so it helpfully reinstalls torchvision
+# 0.26.0 from PyPI — same version number, different binary, compiled against a
+# different torch. The result is not an install error but
+# `RuntimeError: operator torchvision::nms does not exist` at import time.
+#
+# PIP_EXTRA_INDEX_URL keeps the cu128 wheels reachable, so if anything downstream
+# does decide to reinstall torch or torchvision, it can only land on the wheel we
+# already have.
+RUN printf 'torch==2.11.0+cu128\ntorchvision==0.26.0+cu128\nsetuptools<81\n' \
+      > /etc/pip-constraints.txt
+ENV PIP_CONSTRAINT=/etc/pip-constraints.txt \
+    PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu128
 
 # MMPose stack for ViTPose-H. Installed after torch, which mim requires.
 #
@@ -87,10 +97,11 @@ RUN if [ "$BUILD_MMPOSE" = "1" ]; then \
         && pip install --no-cache-dir importlib_metadata cython \
         && pip install --no-cache-dir --force-reinstall --no-build-isolation \
              --no-binary=xtcocotools xtcocotools \
-        && python -c "import torch, mmpretrain; from mmpose.apis import MMPoseInferencer; \
-assert torch.__version__.startswith('2.11.0'), 'torch was replaced: ' + torch.__version__; \
+        && python -c "import torch, torchvision, mmpretrain; from mmpose.apis import MMPoseInferencer; \
 assert 'cu128' in torch.__version__, 'torch is not the cu128 build: ' + torch.__version__; \
-print('torch', torch.__version__, 'intact')" \
+assert 'cu128' in torchvision.__version__, 'torchvision is not the cu128 build: ' + torchvision.__version__; \
+torch.ops.torchvision.nms; \
+print('OK torch', torch.__version__, '| torchvision', torchvision.__version__)" \
         && echo "MMPose OK") \
       || echo "WARNING: MMPose build failed — falling back to Keypoint R-CNN"; \
     fi
